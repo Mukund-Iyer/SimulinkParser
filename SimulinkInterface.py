@@ -2,7 +2,9 @@ import shutil
 import xml.etree.ElementTree as eT
 import os
 import zipfile
-from graphviz import Digraph
+import pydot
+from graphviz import Source
+
 
 class SimulinkModel:
     def __init__(self, model_path):
@@ -18,7 +20,7 @@ class SimulinkModel:
             shutil.rmtree(self.__tempFolderPath)
         self.block_list = sp.blocks
         self.connection_list = sp.connections
-        Grapher(self.block_list,self.connection_list)
+        self.grapher_instance = Grapher(self.block_list,self.connection_list)
 
     def __util_unzip_files(self):
         file_path_list = []
@@ -38,13 +40,15 @@ class SimulinkParser:
         self.tempFolderPath = temp_folder_path
         self.blocks,self.connections = self.__util_parse_tree(self.tree.getroot())
 
-    def __util_parse_tree(self,element):
+    def __util_parse_tree(self,element,parent="root"):
         block_list = element.findall("Block")
         conn_list = self.__util_find_conns(element)
         new_block_list = []
         for block in block_list:
             simulink_block = self.__util_blk_info(block)
-            new_block_list.append(simulink_block)
+            simulink_block["Parent_SID"] = parent
+            if simulink_block not in new_block_list:
+                new_block_list.append(simulink_block)
         return new_block_list,conn_list
 
     def __util_blk_info(self, block):
@@ -74,15 +78,16 @@ class SimulinkParser:
                 mask_param["Mask_Parameter_Value"] = mask_param_value
                 temp = temp | mask_param
 
-        if system_ref_detect is not None:
-            ref = list(system_ref_detect.attrib.values())[0]
-            tree_output = eT.parse(self.__util_find_file(ref + ".xml"))
-            temp["children"],temp["child_conns"] = self.__util_parse_tree(tree_output.getroot())
-
         if port_detect is not None:
             params = port_detect.findall("P")
             for param in params:
                 temp["Port_" + list(param.attrib.values())[0]] = param.text
+
+        if system_ref_detect is not None:
+            ref = list(system_ref_detect.attrib.values())[0]
+            tree_output = eT.parse(self.__util_find_file(ref + ".xml"))
+            temp["children"],temp["child_conns"] = self.__util_parse_tree(tree_output.getroot(),temp["SID"])
+
         return temp
 
     def __util_branch_handling(self,branch,temp):
@@ -133,7 +138,7 @@ class Grapher:
     def __init__(self,block_list,connections,model_name="root"):
         self.blocks = block_list
         self.conns = connections
-        self.visualize(self.conns,model_name)
+        self.visualize(self.conns, model_name)
 
     @staticmethod
     def find_block(input_block_list, prop, value):
@@ -148,38 +153,63 @@ class Grapher:
         return None
 
     @staticmethod
-    def __util_set_node(dot,block):
+    def __util_set_node(graph, block):
         if block["BlockType"] == "Inport" or block["BlockType"] == "Outport":
-            return dot.node(block["Name"],block["Name"],shape='box',style='rounded',tooltip=Grapher.__get_block_val(block))
+            node_temp = pydot.Node(name=block["Name"], label=block["Name"], shape="box", style='rounded',
+                                   tooltip=Grapher.__get_block_val(block))
+            graph.add_node(node_temp)
         elif block["BlockType"] == "SubSystem":
-            probable_path = os.path.join(os.getcwd(), "output", block["Name"] + ".svg")
-            if not os.path.isfile(probable_path):
-                Grapher(block["children"],block["child_conns"],block["Name"])
-            return dot.node(block["Name"], block["Name"], shape='box',URL=block["Name"] + ".svg",tooltip=Grapher.__get_block_val(block))
+            temp_node = graph.get_node(block["Name"])
+            if len(temp_node) == 0:
+                temp_node = pydot.Node(name=block["Name"], label=block["Name"], shape="box", URL=block["Name"] + ".svg",
+                                       tooltip=Grapher.__get_block_val(block))
+                graph.add_node(temp_node)
+                Grapher(block["children"], block["child_conns"], block["Name"])
+            else:
+                data = temp_node[0].obj_dict["attributes"]["tooltip"]
+                data2 = Grapher.__get_block_val(block)
+                existing = Grapher.__parse_block_val_multiline(data)
+                this_instance = Grapher.__parse_block_val_multiline(data2)
+
+                if data != data2:
+                    block["Name"] = block["Name"] + "_temp"
+                    temp_node = pydot.Node(name=block["Name"], label=block["Name"], shape="box",
+                                           tooltip=Grapher.__get_block_val(block))
+                    graph.add_node(temp_node)
+                    Grapher(block["children"], block["child_conns"], block["Name"])
+
         elif block["BlockType"] == "Logic" or block["BlockType"] == "RelationalOperator":
             if "Operator" not in block.keys():
-                return dot.node(block["Name"], block["Name"], shape='box',tooltip=Grapher.__get_block_val(block))
+                node_temp = pydot.Node(name=block["Name"], label=block["Name"], shape="box",
+                                       tooltip=Grapher.__get_block_val(block))
+                graph.add_node(node_temp)
             else:
-                return dot.node(block["Name"], block["Operator"], shape='box',tooltip=Grapher.__get_block_val(block))
+                node_temp = pydot.Node(name=block["Name"], label=block["Operator"], shape="box",
+                                       tooltip=Grapher.__get_block_val(block))
+                graph.add_node(node_temp)
         elif block["BlockType"] == "Constant":
-            return dot.node(block["Name"], block["Value"], shape='box',tooltip=Grapher.__get_block_val(block))
+            node_temp = pydot.Node(name=block["Name"], label=block["Value"], shape="box",
+                                   tooltip=Grapher.__get_block_val(block))
+            graph.add_node(node_temp)
         elif block["BlockType"] == "If":
-            return dot.node(block["Name"], block["BlockType"] + "\n" + block["IfExpression"], shape='box', tooltip=Grapher.__get_block_val(block))
+            node_temp = pydot.Node(name=block["Name"], label=block["BlockType"] + "\n" + block["IfExpression"],
+                                   shape="box", tooltip=Grapher.__get_block_val(block))
+            graph.add_node(node_temp)
         else:
-            return dot.node(block["Name"], block["Name"], shape='box',tooltip=Grapher.__get_block_val(block))
+            node_temp = pydot.Node(name=block["Name"], label=block["Name"], shape="box",
+                                   tooltip=Grapher.__get_block_val(block))
+            graph.add_node(node_temp)
 
     @staticmethod
     def __get_block_val(block):
         excluded_keys = {'children', 'child_conns'}
-        #formatted_text = '\n'.join(f"{k}: {v}" for d in block for k, v in d.items())
-        #formatted_text = '\n'.join(f"{k}: {v}" for k, v in block.items())
+        # formatted_text = '\n'.join(f"{k}: {v}" for d in block for k, v in d.items())
+        # formatted_text = '\n'.join(f"{k}: {v}" for k, v in block.items())
         formatted_text = '\n'.join(f"{k}: {v}" for k, v in block.items() if k not in excluded_keys)
         return formatted_text
 
-    def visualize(self,connections:list,name:str):
-        dot = Digraph(comment='Custom Node Shapes')
-        dot.attr(rankdir='LR')
-
+    def visualize(self, connections:list, name:str):
+        graph = pydot.Dot(graph_type='digraph', rankdir='LR')
         for connection in connections:
             src_blk_sid = connection["Src"]
             if "Dst" in connection.keys():
@@ -187,17 +217,43 @@ class Grapher:
             else:
                 dst_blks = connection["Branch_Dst"]
             src_block = Grapher.find_block(self.blocks, "SID", src_blk_sid)
-            Grapher.__util_set_node(dot,src_block)
-            #dot.node(src_block["Name"], src_block["Name"], shape='box')
-            if isinstance(dst_blks,list):
+            Grapher.__util_set_node(graph, src_block)
+            if isinstance(dst_blks, list):
                 for dst_blk_sid in dst_blks:
                     dst_block = Grapher.find_block(self.blocks, "SID", dst_blk_sid)
-                    Grapher.__util_set_node(dot, dst_block)
+                    Grapher.__util_set_node(graph, dst_block)
                     #dot.node(dst_block["Name"], dst_block["Name"], shape='box')
-                    dot.edge(src_block["Name"], dst_block["Name"],tailport='e', headport='w')
-            elif isinstance(dst_blks,str):
+                    temp_edge = pydot.Edge(src_block["Name"],dst_block["Name"],tailport='e', headport='w')
+                    graph.add_edge(temp_edge)
+            elif isinstance(dst_blks, str):
                 dst_block = Grapher.find_block(self.blocks, "SID", dst_blks)
-                Grapher.__util_set_node(dot, dst_block)
-                #dot.node(dst_block["Name"], dst_block["Name"], shape='box')
-                dot.edge(src_block["Name"], dst_block["Name"],tailport='e', headport='w')
-        dot.render(os.path.join(os.getcwd(),"output",name), format='svg', cleanup=True)
+                Grapher.__util_set_node(graph, dst_block)
+                temp_edge = pydot.Edge(src_block["Name"],dst_block["Name"],tailport='e', headport='w')
+                graph.add_edge(temp_edge)
+        dot_string = graph.to_string()
+        src = Source(dot_string)
+        src.render(os.path.join(os.getcwd(),"output",name), format="svg", cleanup=True)
+
+    @staticmethod
+    def __parse_block_val_multiline(formatted_text):
+        block = {}
+        current_key = None
+        current_value_lines = []
+
+        for line in formatted_text.split('\n'):
+            if ': ' in line and (line.index(': ') == line.find(': ')):  # key line at start
+                if current_key is not None:
+                    # save previous key-value pair
+                    block[current_key] = '\n'.join(current_value_lines)
+                # start new key-value pair
+                current_key, value_start = line.split(': ', 1)
+                current_value_lines = [value_start]
+            else:
+                # line is part of the current value (multi-line)
+                current_value_lines.append(line)
+
+        # save last key-value pair
+        if current_key is not None:
+            block[current_key] = '\n'.join(current_value_lines)
+
+        return block
